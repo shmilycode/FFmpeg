@@ -42,6 +42,8 @@
 #include "os_support.h"
 #include "url.h"
 
+#include "cm256.h"
+
 #ifdef __APPLE__
 #include "TargetConditionals.h"
 #endif
@@ -77,6 +79,24 @@
 #define UDP_MAX_PKT_SIZE 65536
 #define UDP_HEADER_SIZE 8
 
+#define RSFEC_ORIGINAL_COUNT 10
+#define RSFEC_MAX_RECOVERY_COUNT 10 // Redundancy rate maxiumn reach 100%
+#define RSFEC_MAX_BLOCK_BYTES 1472 
+#define ORIGINAL_CONTENT_BUFFER_SIZE (RSFEC_MAX_BLOCK_BYTES*RSFEC_ORIGINAL_COUNT)
+#define RECOVERY_CONTENT_BUFFER_SIZE (RSFEC_MAX_BLOCK_BYTES*RSFEC_MAX_RECOVERY_COUNT)
+#define CM256_BLOCK_COUNT 256
+#define CURRENT_RECOVERY_COUNT 4
+
+typedef struct RSFECContext{
+    cm256_encoder_params params;
+    uint8_t original_content_buffer[ORIGINAL_CONTENT_BUFFER_SIZE];
+    uint8_t recovery_content_buffer[RECOVERY_CONTENT_BUFFER_SIZE];
+    cm256_block blocks[CM256_BLOCK_COUNT];
+    int original_block_count;
+    int recovery_block_count;
+    uint8_t tmp[RSFEC_MAX_BLOCK_BYTES];
+} RSFECContext;
+
 typedef struct UDPContext {
     const AVClass *class;
     int udp_fd;
@@ -105,6 +125,7 @@ typedef struct UDPContext {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int thread_started;
+    RSFECContext* rsfec_context;
 #endif
     uint8_t tmp[UDP_MAX_PKT_SIZE+4];
     int remaining_in_dg;
@@ -495,9 +516,349 @@ static int udp_get_file_handle(URLContext *h)
     return s->udp_fd;
 }
 
+/** 
+  * Block header. 
+  * 0 | 0 0 0 0 0 0 0 | 0 0 0 0 0 0 0 0  0 0 0 0 0 0 0 0
+  * - 
+  * 0 means original block, 1 means recovery block
+  *     - - - - - - -
+  *     7 bits use to store the block index from 0 ~ 128,
+  *                     - - - - - - - -  - - - - - - - -
+  *                     Left 16 bits use to store the size of block
+  * 
+**/
+
+// Check if data is original data.
+static int get_rsfec_block_type(uint8_t state)
+{
+    return 0x80 & state;
+}
+
+// get block size
+static int get_rsfec_block_size(uint8_t *state)
+{
+    return *((uint16_t *)state);
+}
+
+// get block index
+static int get_rsfec_block_index(uint8_t state)
+{
+    return 0x7f & state;
+}
+
+// Initial data fields in @RSFECContext
+static void init_rsfec_context(RSFECContext* rsfec_context)
+{
+    if (!rsfec_context) 
+    {
+        av_log(NULL, AV_LOG_ERROR, "RSFECContext can't be NULL!\n");
+    }
+    rsfec_context->params.BlockBytes = RSFEC_MAX_BLOCK_BYTES;
+    rsfec_context->params.OriginalCount = RSFEC_ORIGINAL_COUNT;
+    rsfec_context->params.RecoveryCount = CURRENT_RECOVERY_COUNT;
+    rsfec_context->original_block_count = 0;
+    rsfec_context->recovery_block_count = 0;
+    memset(rsfec_context->recovery_content_buffer, 0, RECOVERY_CONTENT_BUFFER_SIZE);
+
+    for (int block_index = 0; block_index < CM256_BLOCK_COUNT; ++block_index) {
+        rsfec_context->blocks[block_index].Block = NULL;
+        rsfec_context->blocks[block_index].Index = -1;
+    }
+}
+
+static uint8_t *backup_rsfec_data(uint8_t *buffer, int block_count, 
+                                  uint8_t* recv_data, int length)
+{
+    int offset = block_count * RSFEC_MAX_BLOCK_BYTES;
+    uint8_t *address = buffer+offset;
+    memcpy(address, recv_data, length);
+    return address;
+}
+
+static uint8_t *find_block_by_index(RSFECContext *rsfec_context, int index)
+{
+    cm256_block * blocks = rsfec_context->blocks;
+    for(int i = 0; i < CM256_BLOCK_COUNT && blocks[i].Block; i++) {
+        if (blocks[i].Index == index)
+          return blocks[i].Block;
+    }
+    return NULL;
+}
+
+static int rsfec_decode_to_fifo(UDPContext *s, RSFECContext *rsfec_context)
+{
+    int index_start = cm256_get_original_block_index(rsfec_context->params, 0);
+    int index_end = cm256_get_original_block_index(rsfec_context->params, RSFEC_ORIGINAL_COUNT);
+    for(int block_index = index_start; block_index < index_end; ++block_index)
+    {
+        uint8_t *block_start = find_block_by_index(rsfec_context, block_index);
+        if (!block_start) {
+            av_log(NULL, AV_LOG_WARNING, "block index doesn't existed!\n");
+            continue;
+        }
+        int len = AV_RL16(block_start) - 2;
+
+        if(av_fifo_space(s->fifo) < len + 4) {
+            /* No Space left */
+            if (s->overrun_nonfatal) {
+                av_log(NULL, AV_LOG_WARNING, "Circular buffer overrun. "
+                        "Surviving due to overrun_nonfatal option\n");
+                continue;
+            } else {
+                av_log(NULL, AV_LOG_ERROR, "Circular buffer overrun. "
+                        "To avoid, increase fifo_size URL option. "
+                        "To survive in such case, use overrun_nonfatal option\n");
+                s->circular_buffer_error = AVERROR(EIO);
+                return -1;
+            }
+        }
+
+        uint8_t tmp[4];
+        AV_WL32(tmp, len);
+        av_fifo_generic_write(s->fifo, tmp, 4, NULL); /* size of packet */
+        // The first 2 bytes for block header
+        av_fifo_generic_write(s->fifo, block_start + 2, len, NULL);
+        pthread_cond_signal(&s->cond);
+    }
+    return 0;
+}
+
+static int rsfec_decode_process(UDPContext *udp_context, RSFECContext *rsfec_context, 
+                                 uint8_t* recv_data, int length)
+{
+    av_log(NULL, AV_LOG_DEBUG, "rsfec_decode_process!\n");
+    uint8_t *buffer_address = recv_data;
+    int buffer_length = length;
+
+    // First bytes store the RSFEC header, so don't copy it.
+    uint8_t state = *(buffer_address++);
+    --buffer_length;
+
+    int index = get_rsfec_block_index(state);
+    int block_sum = rsfec_context->recovery_block_count + rsfec_context->original_block_count;
+
+    // Check if @buffer_address contain the original data.
+    if (get_rsfec_block_type(state) == 0) {
+        if (rsfec_context->recovery_block_count ||
+            rsfec_context->original_block_count >= RSFEC_ORIGINAL_COUNT ||
+            find_block_by_index(rsfec_context, index)) {
+            av_log(NULL, AV_LOG_DEBUG, "Receive new RSFEC group, reinitialize the context!\n");
+            if (block_sum < RSFEC_ORIGINAL_COUNT) {
+                int ret = rsfec_decode_to_fifo(udp_context, rsfec_context);
+                if (ret < 0)
+                  return ret;
+            }
+            init_rsfec_context(rsfec_context);
+        }
+
+        int original_block_count = rsfec_context->original_block_count;
+        uint8_t *block_address;
+        block_address = backup_rsfec_data(rsfec_context->original_content_buffer, 
+                                          original_block_count, buffer_address, 
+                                          buffer_length);
+
+        rsfec_context->blocks[original_block_count].Block = block_address;
+        rsfec_context->blocks[original_block_count].Index = cm256_get_original_block_index(
+                                                              rsfec_context->params, 
+                                                              index);
+        
+        original_block_count = ++rsfec_context->original_block_count;
+
+        // Receive all the original blocks successfully, lucky.
+        if(original_block_count == RSFEC_ORIGINAL_COUNT) {
+            av_log(NULL, AV_LOG_DEBUG, "Lucky!!!!\n");
+#if HAVE_PTHREAD_CANCEL
+          if(udp_context->fifo) {
+            return rsfec_decode_to_fifo(udp_context, rsfec_context);
+          }
+#endif
+        }
+    } else {
+//        av_log(NULL, AV_LOG_DEBUG, "Receive recovery block\n");
+
+        if (block_sum >= RSFEC_ORIGINAL_COUNT) {
+            av_log(NULL, AV_LOG_DEBUG, "RSFEC group is full, drop this recovery block!\n");
+            return 0;
+        } 
+
+        uint8_t *block_address;
+        block_address = backup_rsfec_data(rsfec_context->recovery_content_buffer, 
+                                          rsfec_context->recovery_block_count, 
+                                          buffer_address, 
+                                          buffer_length);
+        rsfec_context->blocks[block_sum].Block = block_address;
+        rsfec_context->blocks[block_sum].Index = cm256_get_recovery_block_index(
+                                                              rsfec_context->params, 
+                                                              index);
+        ++rsfec_context->recovery_block_count;
+        ++block_sum;
+
+
+        if(block_sum == RSFEC_ORIGINAL_COUNT) {
+            av_log(NULL, AV_LOG_WARNING, "RSFEC group is enough, start to decode!\n");
+            if(cm256_decode(rsfec_context->params, rsfec_context->blocks)) {
+                av_log(NULL, AV_LOG_ERROR, "RSFEC decode failed!\n");
+            }  else  {
+#if HAVE_PTHREAD_CANCEL
+                if(udp_context->fifo) {
+                  return rsfec_decode_to_fifo(udp_context, rsfec_context);
+                }
+#endif
+            }
+        }
+    }
+    return 0;
+}
+
+static uint8_t build_rsfec_header(int type, uint8_t index)
+{
+    uint8_t rsfec_header = 0;
+    //recovery block
+    if (type == 1) {
+        rsfec_header = 1 << 7;
+    }
+    rsfec_header += index;
+    return rsfec_header;
+}
+
+static int rsfec_encode_to_fifo(UDPContext *s, uint8_t rsfec_header, 
+                                uint8_t *block_start, int size)
+{
+    uint8_t tmp[4];
+    pthread_mutex_lock(&s->mutex);
+
+    /*
+      Return error if last tx failed.
+      Here we can't know on which packet error was, but it needs to know that error exists.
+    */
+    if (s->circular_buffer_error<0) {
+        int err=s->circular_buffer_error;
+        pthread_mutex_unlock(&s->mutex);
+        return err;
+    }
+
+    if(av_fifo_space(s->fifo) < size + 5) {
+        /* What about a partial packet tx ? */
+        pthread_mutex_unlock(&s->mutex);
+        return AVERROR(ENOMEM);
+    }
+    AV_WL32(tmp, size + 1);
+    av_fifo_generic_write(s->fifo, tmp, 4, NULL); /* size of packet */
+    av_fifo_generic_write(s->fifo, &rsfec_header, 1, NULL); /* rsfec header */
+    av_fifo_generic_write(s->fifo, (uint8_t *)block_start, size, NULL); /* the data */
+    pthread_cond_signal(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+    return 0;
+}
+
+static int rsfec_encode_to_send(URLContext *h, UDPContext *s,
+                                uint8_t *buf, int size)
+{
+    int ret = 0;
+    if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
+        ret = ff_network_wait_fd(s->udp_fd, 1);
+        if (ret < 0)
+            return ret;
+    }
+    if (!s->is_connected) {
+        ret = sendto (s->udp_fd, buf, size, 0,
+                      (struct sockaddr *) &s->dest_addr,
+                      s->dest_addr_len);
+    } else {
+        ret = send(s->udp_fd, buf, size, 0);
+    }
+    return ret;
+}
+
+static int rsfec_do_send(URLContext *h, UDPContext *s, RSFECContext *rsfec_context)
+{
+    av_log(NULL, AV_LOG_DEBUG, "rsfec_do_send!\n");
+    int original_block_count = rsfec_context->params.OriginalCount;
+    int recovery_block_count = rsfec_context->params.RecoveryCount;
+    int block_sum = original_block_count + recovery_block_count;
+    uint8_t rsfec_header = 0;
+    int ret = 0;
+    //Firstly, send the original blocks
+    //Secondly, sned the recovery blocks
+    for (int block_index = 0; block_index < block_sum; ++block_index) {
+        int index = block_index;
+        uint8_t *block_start = rsfec_context->original_content_buffer;
+        rsfec_header = build_rsfec_header(0, index);
+        int size = 0;
+        if (index >= rsfec_context->original_block_count) {
+            block_start = rsfec_context->recovery_content_buffer;
+            index -= original_block_count;
+            rsfec_header = build_rsfec_header(1, index);
+            size = RSFEC_MAX_BLOCK_BYTES - 1;
+        }
+//        av_log(NULL, AV_LOG_DEBUG, "rsfec_encdoe_to_fifo index=%d \
+//                , rsfec_header=%d   ", index, rsfec_header);
+
+        block_start += index * RSFEC_MAX_BLOCK_BYTES;
+
+        // The first byte use to store the block state for original block
+        size = (size == 0 ? get_rsfec_block_size(block_start) : size);
+
+#if HAVE_PTHREAD_CANCEL
+        if (s->fifo) {
+            if((ret = rsfec_encode_to_fifo(s, rsfec_header, 
+                                           block_start, size))) {
+                return ret;
+            }
+            continue;
+        }
+#endif
+
+        memset(rsfec_context->tmp, 0, sizeof(rsfec_context->tmp));
+        memcpy(rsfec_context->tmp, &rsfec_header, 1);
+        memcpy(rsfec_context->tmp+1, block_start, size);
+        ret = rsfec_encode_to_send(h, s, rsfec_context->tmp, size+1);
+    } // for
+    return ret;
+}
+
+static int rsfec_encode_process(URLContext *h, UDPContext *udp_context, 
+                                RSFECContext *rsfec_context, 
+                                const uint8_t* buff, int length)
+{
+    int original_block_count = rsfec_context->original_block_count;
+    int result = 0;
+
+    // Fill data to rsfec blocks
+    {
+        uint8_t *original_start =  rsfec_context->original_content_buffer;
+        original_start += original_block_count * RSFEC_MAX_BLOCK_BYTES;
+
+        //Store block length at first 2 bytes.
+        AV_WL16(original_start, length+2);
+        memcpy(original_start + 2, buff, length);
+        rsfec_context->blocks[original_block_count].Block = original_start;
+        rsfec_context->blocks[original_block_count].Index = cm256_get_original_block_index(
+                                                              rsfec_context->params, 
+                                                              original_block_count);
+        ++rsfec_context->original_block_count;
+    }
+
+    if (rsfec_context->original_block_count == RSFEC_ORIGINAL_COUNT) {
+        av_log(NULL, AV_LOG_DEBUG, "Get enough block, encode %d %d %d\n", 
+              rsfec_context->params.BlockBytes, rsfec_context->params.OriginalCount,
+              rsfec_context->params.RecoveryCount);
+        if (cm256_encode(rsfec_context->params, rsfec_context->blocks,
+                     rsfec_context->recovery_content_buffer)) {
+            av_log(NULL, AV_LOG_DEBUG, "RSFEC encode failed!!\n");
+        }
+        else {
+            result = rsfec_do_send(h, udp_context, rsfec_context);
+        }
+        init_rsfec_context(rsfec_context);
+    }
+    return result;
+}
+
 #if HAVE_PTHREAD_CANCEL
 static void *circular_buffer_task_rx( void *_URLContext)
 {
+    av_log(NULL, AV_LOG_DEBUG, "circular_buffer_task_rx\n");
     URLContext *h = _URLContext;
     UDPContext *s = h->priv_data;
     int old_cancelstate;
@@ -511,7 +872,6 @@ static void *circular_buffer_task_rx( void *_URLContext)
     }
     while(1) {
         int len;
-
         pthread_mutex_unlock(&s->mutex);
         /* Blocking operations are always cancellation points;
            see "General Information" / "Thread Cancelation Overview"
@@ -527,24 +887,29 @@ static void *circular_buffer_task_rx( void *_URLContext)
             }
             continue;
         }
-        AV_WL32(s->tmp, len);
 
-        if(av_fifo_space(s->fifo) < len + 4) {
-            /* No Space left */
-            if (s->overrun_nonfatal) {
-                av_log(h, AV_LOG_WARNING, "Circular buffer overrun. "
-                        "Surviving due to overrun_nonfatal option\n");
-                continue;
-            } else {
-                av_log(h, AV_LOG_ERROR, "Circular buffer overrun. "
-                        "To avoid, increase fifo_size URL option. "
-                        "To survive in such case, use overrun_nonfatal option\n");
-                s->circular_buffer_error = AVERROR(EIO);
-                goto end;
-            }
-        }
-        av_fifo_generic_write(s->fifo, s->tmp, len+4, NULL);
-        pthread_cond_signal(&s->cond);
+        //Decode RSFEC here
+        if(rsfec_decode_process(s, s->rsfec_context, s->tmp+4, len) < 0)
+          goto end;
+
+//        AV_WL32(s->tmp, len);
+
+//        if(av_fifo_space(s->fifo) < len + 4) {
+//            /* No Space left */
+//            if (s->overrun_nonfatal) {
+//                av_log(h, AV_LOG_WARNING, "Circular buffer overrun. "
+//                        "Surviving due to overrun_nonfatal option\n");
+//                continue;
+//            } else {
+//                av_log(h, AV_LOG_ERROR, "Circular buffer overrun. "
+//                        "To avoid, increase fifo_size URL option. "
+//                        "To survive in such case, use overrun_nonfatal option\n");
+//                s->circular_buffer_error = AVERROR(EIO);
+//                goto end;
+//            }
+//        }
+//        av_fifo_generic_write(s->fifo, s->tmp, len+4, NULL);
+//        pthread_cond_signal(&s->cond);
     }
 
 end:
@@ -629,8 +994,9 @@ static void *circular_buffer_task_tx( void *_URLContext)
                 ret = sendto (s->udp_fd, p, len, 0,
                             (struct sockaddr *) &s->dest_addr,
                             s->dest_addr_len);
-            } else
+            } else {
                 ret = send(s->udp_fd, p, len, 0);
+            }
             if (ret >= 0) {
                 len -= ret;
                 p   += ret;
@@ -682,6 +1048,7 @@ static int parse_source_list(char *buf, char **sources, int *num_sources,
 /* return non zero if error */
 static int udp_open(URLContext *h, const char *uri, int flags)
 {
+    av_log(NULL, AV_LOG_DEBUG, "Walle udp_open\n");
     char hostname[1024], localaddr[1024] = "";
     int port, udp_fd = -1, tmp, bind_ret = -1, dscp = -1;
     UDPContext *s = h->priv_data;
@@ -713,7 +1080,7 @@ static int udp_open(URLContext *h, const char *uri, int flags)
     }
 
     if (s->pkt_size > 0)
-        h->max_packet_size = s->pkt_size;
+        h->max_packet_size = s->pkt_size - 3;
 
     p = strchr(uri, '?');
     if (p) {
@@ -794,7 +1161,7 @@ static int udp_open(URLContext *h, const char *uri, int flags)
     /* handling needed to support options picking from both AVOption and URL */
     s->circular_buffer_size *= 188;
     if (flags & AVIO_FLAG_WRITE) {
-        h->max_packet_size = s->pkt_size;
+        h->max_packet_size = s->pkt_size - 3;
     } else {
         h->max_packet_size = UDP_MAX_PKT_SIZE;
     }
@@ -951,6 +1318,13 @@ static int udp_open(URLContext *h, const char *uri, int flags)
 
     s->udp_fd = udp_fd;
 
+    if (cm256_init()) {
+        av_log(h, AV_LOG_ERROR,"cm256_init failed!!!!!\n");
+    }
+    /*allocate and initial rsfec context*/
+    s->rsfec_context = av_malloc(sizeof(RSFECContext));
+    init_rsfec_context(s->rsfec_context);
+
 #if HAVE_PTHREAD_CANCEL
     /*
       Create thread in case of:
@@ -997,6 +1371,7 @@ static int udp_open(URLContext *h, const char *uri, int flags)
  fail:
     if (udp_fd >= 0)
         closesocket(udp_fd);
+    av_freep(&s->rsfec_context);
     av_fifo_freep(&s->fifo);
     for (i = 0; i < num_include_sources; i++)
         av_freep(&include_sources[i]);
@@ -1039,6 +1414,7 @@ static int udp_read(URLContext *h, uint8_t *buf, int size)
                 av_fifo_generic_read(s->fifo, buf, avail, NULL);
                 av_fifo_drain(s->fifo, AV_RL32(tmp) - avail);
                 pthread_mutex_unlock(&s->mutex);
+                av_log(NULL, AV_LOG_DEBUG, "Walle udp_read require %d, accept %d bytes\n", size, avail);
                 return avail;
             } else if(s->circular_buffer_error){
                 int err = s->circular_buffer_error;
@@ -1070,44 +1446,53 @@ static int udp_read(URLContext *h, uint8_t *buf, int size)
             return ret;
     }
     ret = recv(s->udp_fd, buf, size, 0);
-
     return ret < 0 ? ff_neterrno() : ret;
 }
 
 static int udp_write(URLContext *h, const uint8_t *buf, int size)
 {
+    av_log(NULL, AV_LOG_DEBUG, "Walle udp_write %d bytes\n", size);
     UDPContext *s = h->priv_data;
     int ret;
 
-#if HAVE_PTHREAD_CANCEL
-    if (s->fifo) {
-        uint8_t tmp[4];
-
-        pthread_mutex_lock(&s->mutex);
-
-        /*
-          Return error if last tx failed.
-          Here we can't know on which packet error was, but it needs to know that error exists.
-        */
-        if (s->circular_buffer_error<0) {
-            int err=s->circular_buffer_error;
-            pthread_mutex_unlock(&s->mutex);
-            return err;
-        }
-
-        if(av_fifo_space(s->fifo) < size + 4) {
-            /* What about a partial packet tx ? */
-            pthread_mutex_unlock(&s->mutex);
-            return AVERROR(ENOMEM);
-        }
-        AV_WL32(tmp, size);
-        av_fifo_generic_write(s->fifo, tmp, 4, NULL); /* size of packet */
-        av_fifo_generic_write(s->fifo, (uint8_t *)buf, size, NULL); /* the data */
-        pthread_cond_signal(&s->cond);
-        pthread_mutex_unlock(&s->mutex);
+    ret = rsfec_encode_process(h, s, s->rsfec_context, buf, size);
+    if (ret < 0) {
+        return ret;
+    }
+    else {
         return size;
     }
-#endif
+
+//#if HAVE_PTHREAD_CANCEL
+//    if (s->fifo) {
+//        av_log(NULL, AV_LOG_DEBUG, "Walle s->fifo %p\n", s->fifo);
+//        uint8_t tmp[4];
+//
+//        pthread_mutex_lock(&s->mutex);
+//
+//        /*
+//          Return error if last tx failed.
+//          Here we can't know on which packet error was, but it needs to know that error exists.
+//        */
+//        if (s->circular_buffer_error<0) {
+//            int err=s->circular_buffer_error;
+//            pthread_mutex_unlock(&s->mutex);
+//            return err;
+//        }
+//
+//        if(av_fifo_space(s->fifo) < size + 4) {
+//            /* What about a partial packet tx ? */
+//            pthread_mutex_unlock(&s->mutex);
+//            return AVERROR(ENOMEM);
+//        }
+//        AV_WL32(tmp, size);
+//        av_fifo_generic_write(s->fifo, tmp, 4, NULL); /* size of packet */
+//        av_fifo_generic_write(s->fifo, (uint8_t *)buf, size, NULL); /* the data */
+//        pthread_cond_signal(&s->cond);
+//        pthread_mutex_unlock(&s->mutex);
+//        return size;
+//    }
+//#endif
     if (!(h->flags & AVIO_FLAG_NONBLOCK)) {
         ret = ff_network_wait_fd(s->udp_fd, 1);
         if (ret < 0)
@@ -1118,8 +1503,9 @@ static int udp_write(URLContext *h, const uint8_t *buf, int size)
         ret = sendto (s->udp_fd, buf, size, 0,
                       (struct sockaddr *) &s->dest_addr,
                       s->dest_addr_len);
-    } else
+    } else {
         ret = send(s->udp_fd, buf, size, 0);
+    }
 
     return ret < 0 ? ff_neterrno() : ret;
 }
@@ -1154,6 +1540,7 @@ static int udp_close(URLContext *h)
     }
 #endif
     closesocket(s->udp_fd);
+    av_freep(&s->rsfec_context);
     av_fifo_freep(&s->fifo);
     return 0;
 }

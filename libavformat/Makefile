@@ -22,6 +22,8 @@ OBJS = allformats.o         \
        protocols.o          \
        riff.o               \
        sdp.o                \
+	     cm256.o 							\
+	     gf256.o							\
        url.o                \
        utils.o              \
 
