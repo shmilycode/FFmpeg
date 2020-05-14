@@ -951,9 +951,11 @@ static int unpack_vlcs(Vp3DecodeContext *s, GetBitContext *gb,
     Vp3Fragment *all_fragments = s->all_fragments;
     VLC_TYPE(*vlc_table)[2] = table->table;
 
-    if (num_coeffs < 0)
+    if (num_coeffs < 0) {
         av_log(s->avctx, AV_LOG_ERROR,
                "Invalid number of coefficients at level %d\n", coeff_index);
+        return AVERROR_INVALIDDATA;
+    }
 
     if (eob_run > num_coeffs) {
         coeff_i      =
@@ -977,6 +979,9 @@ static int unpack_vlcs(Vp3DecodeContext *s, GetBitContext *gb,
             eob_run = eob_run_base[token];
             if (eob_run_get_bits[token])
                 eob_run += get_bits(gb, eob_run_get_bits[token]);
+
+            if (!eob_run)
+                eob_run = INT_MAX;
 
             // record only the number of blocks ended in this plane,
             // any spill will be recorded in the next plane.
@@ -2271,6 +2276,10 @@ static int theora_decode_header(AVCodecContext *avctx, GetBitContext *gb)
     s->theora_header = 0;
     s->theora = get_bits_long(gb, 24);
     av_log(avctx, AV_LOG_DEBUG, "Theora bitstream version %X\n", s->theora);
+    if (!s->theora) {
+        s->theora = 1;
+        avpriv_request_sample(s->avctx, "theora 0");
+    }
 
     /* 3.2.0 aka alpha3 has the same frame orientation as original vp3
      * but previous versions have the image flipped relative to vp3 */

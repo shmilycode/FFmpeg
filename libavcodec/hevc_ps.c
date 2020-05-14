@@ -1324,6 +1324,11 @@ static int pps_range_extensions(GetBitContext *gb, AVCodecContext *avctx,
     pps->log2_sao_offset_scale_luma = get_ue_golomb_long(gb);
     pps->log2_sao_offset_scale_chroma = get_ue_golomb_long(gb);
 
+    if (   pps->log2_sao_offset_scale_luma   > FFMAX(sps->bit_depth        - 10, 0)
+        || pps->log2_sao_offset_scale_chroma > FFMAX(sps->bit_depth_chroma - 10, 0)
+    )
+        return AVERROR_INVALIDDATA;
+
     return(0);
 }
 
@@ -1577,22 +1582,25 @@ int ff_hevc_decode_nal_pps(GetBitContext *gb, AVCodecContext *avctx,
     pps->entropy_coding_sync_enabled_flag = get_bits1(gb);
 
     if (pps->tiles_enabled_flag) {
-        pps->num_tile_columns = get_ue_golomb_long(gb) + 1;
-        pps->num_tile_rows    = get_ue_golomb_long(gb) + 1;
-        if (pps->num_tile_columns <= 0 ||
-            pps->num_tile_columns >= sps->width) {
+        int num_tile_columns_minus1 = get_ue_golomb(gb);
+        int num_tile_rows_minus1    = get_ue_golomb(gb);
+
+        if (num_tile_columns_minus1 < 0 ||
+            num_tile_columns_minus1 >= sps->ctb_width - 1) {
             av_log(avctx, AV_LOG_ERROR, "num_tile_columns_minus1 out of range: %d\n",
-                   pps->num_tile_columns - 1);
-            ret = AVERROR_INVALIDDATA;
+                   num_tile_columns_minus1);
+            ret = num_tile_columns_minus1 < 0 ? num_tile_columns_minus1 : AVERROR_INVALIDDATA;
             goto err;
         }
-        if (pps->num_tile_rows <= 0 ||
-            pps->num_tile_rows >= sps->height) {
+        if (num_tile_rows_minus1 < 0 ||
+            num_tile_rows_minus1 >= sps->ctb_height - 1) {
             av_log(avctx, AV_LOG_ERROR, "num_tile_rows_minus1 out of range: %d\n",
-                   pps->num_tile_rows - 1);
-            ret = AVERROR_INVALIDDATA;
+                   num_tile_rows_minus1);
+            ret = num_tile_rows_minus1 < 0 ? num_tile_rows_minus1 : AVERROR_INVALIDDATA;
             goto err;
         }
+        pps->num_tile_columns = num_tile_columns_minus1 + 1;
+        pps->num_tile_rows    = num_tile_rows_minus1    + 1;
 
         pps->column_width = av_malloc_array(pps->num_tile_columns, sizeof(*pps->column_width));
         pps->row_height   = av_malloc_array(pps->num_tile_rows,    sizeof(*pps->row_height));
@@ -1702,6 +1710,22 @@ int ff_hevc_decode_nal_pps(GetBitContext *gb, AVCodecContext *avctx,
 err:
     av_buffer_unref(&pps_buf);
     return ret;
+}
+
+void ff_hevc_ps_uninit(HEVCParamSets *ps)
+{
+    int i;
+
+    for (i = 0; i < FF_ARRAY_ELEMS(ps->vps_list); i++)
+        av_buffer_unref(&ps->vps_list[i]);
+    for (i = 0; i < FF_ARRAY_ELEMS(ps->sps_list); i++)
+        av_buffer_unref(&ps->sps_list[i]);
+    for (i = 0; i < FF_ARRAY_ELEMS(ps->pps_list); i++)
+        av_buffer_unref(&ps->pps_list[i]);
+
+    ps->sps = NULL;
+    ps->pps = NULL;
+    ps->vps = NULL;
 }
 
 int ff_hevc_compute_poc(const HEVCSPS *sps, int pocTid0, int poc_lsb, int nal_unit_type)

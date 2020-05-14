@@ -343,8 +343,8 @@ typedef struct HEVCPPS {
     uint8_t tiles_enabled_flag;
     uint8_t entropy_coding_sync_enabled_flag;
 
-    int num_tile_columns;   ///< num_tile_columns_minus1 + 1
-    int num_tile_rows;      ///< num_tile_rows_minus1 + 1
+    uint16_t num_tile_columns;   ///< num_tile_columns_minus1 + 1
+    uint16_t num_tile_rows;      ///< num_tile_rows_minus1 + 1
     uint8_t uniform_spacing_flag;
     uint8_t loop_filter_across_tiles_enabled_flag;
 
@@ -420,6 +420,8 @@ int ff_hevc_decode_nal_sps(GetBitContext *gb, AVCodecContext *avctx,
                            HEVCParamSets *ps, int apply_defdispwin);
 int ff_hevc_decode_nal_pps(GetBitContext *gb, AVCodecContext *avctx,
                            HEVCParamSets *ps);
+
+void ff_hevc_ps_uninit(HEVCParamSets *ps);
 
 int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
                                   ShortTermRPS *rps, const HEVCSPS *sps, int is_slice_header);
