@@ -564,6 +564,7 @@ static int gdigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
                 source_hdc,
                 clip_rect.left, clip_rect.top, SRCCOPY | CAPTUREBLT)) {
         WIN32_API_ERROR("Failed to capture image");
+        av_packet_unref(pkt);
         return AVERROR(EIO);
     }
     if (gdigrab->draw_mouse)
