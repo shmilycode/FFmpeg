@@ -50,6 +50,7 @@ static void register_all(void)
     REGISTER_INDEV   (DSHOW,            dshow);
     REGISTER_INOUTDEV(FBDEV,            fbdev);
     REGISTER_INDEV   (GDIGRAB,          gdigrab);
+    REGISTER_INDEV   (DXGIGRAB,          dxgigrab);
     REGISTER_INDEV   (IEC61883,         iec61883);
     REGISTER_INDEV   (JACK,             jack);
     REGISTER_INDEV   (KMSGRAB,          kmsgrab);
