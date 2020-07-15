@@ -1651,6 +1651,12 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
         return ret;
     }
 
+    width = dxgigrab->scaled_width;
+    height = dxgigrab->scaled_height;
+    if (av_new_packet(pkt, 
+                      width * height * 3 / 2) < 0)
+        return AVERROR(ENOMEM);
+
     ID3D11DeviceContext_CopyResource(d3d11_device_ctx, dxgigrab->cpu_accessible_luminance_surf, dxgigrab->luminance_surf);
 
     hr = ID3D11DeviceContext_Map(d3d11_device_ctx,  
@@ -1658,12 +1664,11 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
                                  subresource, 
                                  D3D11_MAP_READ, 
                                  0, &resource);
-
-    width = dxgigrab->scaled_width;
-    height = dxgigrab->scaled_height;
-    if (av_new_packet(pkt, 
-                      resource.RowPitch * height + resource.RowPitch * height / 2) < 0)
-        return AVERROR(ENOMEM);
+    if (FAILED(hr)) {
+        av_log(s1, AV_LOG_ERROR, "Map luminance surface failed.");
+        av_packet_unref(pkt);
+        return AVERROR(EIO);
+    }
 
     sptr = (BYTE*)(resource.pData);
     dptr = pkt->data;
@@ -1686,6 +1691,11 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
                                  D3D11_MAP_READ, 
                                  0, &resource);
 
+    if (FAILED(hr)) {
+        ID3D11DeviceContext_Unmap(d3d11_device_ctx, dxgigrab->cpu_accessible_luminance_surf, subresource);
+        av_packet_unref(pkt);
+        return AVERROR(EIO);
+    }
     sptr = (BYTE*)(resource.pData);
 
     for (int i = 0; i < height/2; i++)
