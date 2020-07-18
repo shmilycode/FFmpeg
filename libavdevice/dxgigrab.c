@@ -1574,6 +1574,7 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
     }
 
     if (time_out) {
+        dxgigrab->time_frame = time_frame;
         return AVERROR(EAGAIN);
     }
 
