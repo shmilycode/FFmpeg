@@ -98,7 +98,6 @@ struct dxgigrab {
 
     ID3D11Device              *d3d11_device;
     ID3D11DeviceContext       *d3d11_device_ctx;
-    ID3D11Texture2D           *scale_src_surf;
     ID3D11Texture2D           *luminance_surf;
     ID3D11Texture2D           *chrominance_surf;
     ID3D11Texture2D           *cpu_accessible_luminance_surf;
@@ -136,7 +135,7 @@ struct dxgigrab {
 //
 // Recreate shared texture
 //
-int CreateSharedSurf(ID3D11Device *d3d11_device, RECT* desk_bounds, ID3D11Texture2D **surface) 
+int CreateSharedSurf(ID3D11Device *d3d11_device, RECT* desk_bounds, ID3D11Texture2D **surface, int scale_factor) 
 {
     ID3D11Texture2D **shared_surf = surface;
     IDXGIDevice* dxgi_device = NULL;
@@ -183,8 +182,8 @@ int CreateSharedSurf(ID3D11Device *d3d11_device, RECT* desk_bounds, ID3D11Textur
 
     // Create shared texture for all duplication threads to draw into
     RtlZeroMemory(&desk_tex_desc, sizeof(D3D11_TEXTURE2D_DESC));
-    desk_tex_desc.Width = desk_bounds->right - desk_bounds->left;
-    desk_tex_desc.Height = desk_bounds->bottom - desk_bounds->top;
+    desk_tex_desc.Width = ((desk_bounds->right - desk_bounds->left)/scale_factor) & ~1;
+    desk_tex_desc.Height = ((desk_bounds->bottom - desk_bounds->top)/scale_factor) & ~1;
     desk_tex_desc.MipLevels = 1;
     desk_tex_desc.ArraySize = 1;
     desk_tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -374,7 +373,8 @@ int InitOutput(struct dxgigrab* dxgigrab)
     }
 
     // Create shared texture
-    ret = CreateSharedSurf(d3d11_device, &desk_bounds, &shared_surface);
+    ret = CreateSharedSurf(d3d11_device, &desk_bounds, &shared_surface, 
+                           dxgigrab->down_sample_factor);
     if (ret != 0) {
         ret = AVERROR(EIO);
         goto error;
@@ -632,13 +632,11 @@ int GetMouse(struct dxgigrab* dxgigrab, PTR_INFO* pointer_info, DXGI_OUTDUPL_FRA
     return 0;
 }
 
-void SetDrawVert(VERTEX* vertices, RECT* clip_rect, 
-                  INT OffsetX, INT OffsetY, DXGI_OUTPUT_DESC* desk_desc, 
-                  D3D11_TEXTURE2D_DESC* full_desc, D3D11_TEXTURE2D_DESC* this_desc)
+void SetDrawVert( VERTEX* vertices, RECT* clip_rect, 
+                  INT OffsetX, INT OffsetY, 
+                  DXGI_OUTPUT_DESC* desk_desc, D3D11_TEXTURE2D_DESC* this_desc,
+                  INT center_X, INT center_Y)
 {
-    INT center_X = full_desc->Width / 2;
-    INT center_Y = full_desc->Height / 2;
-
     INT Width = desk_desc->DesktopCoordinates.right - desk_desc->DesktopCoordinates.left;
     INT Height = desk_desc->DesktopCoordinates.bottom - desk_desc->DesktopCoordinates.top;
 
@@ -761,6 +759,10 @@ int DrawFrame(struct dxgigrab* dxgigrab, ID3D11Texture2D* SrcSurface,
     UINT stride = sizeof(VERTEX);
     UINT offset = 0;
     D3D11_VIEWPORT VP;
+    ID3D11ShaderResourceView* null_shader_resource = NULL;
+
+    //Unbind resource from input slot.
+    ID3D11DeviceContext_PSSetShaderResources(d3d11_device_ctx, 0, 1, &null_shader_resource);
 
     ID3D11Texture2D_GetDesc(shared_surf, &full_desc);
 
@@ -792,7 +794,10 @@ int DrawFrame(struct dxgigrab* dxgigrab, ID3D11Texture2D* SrcSurface,
     ID3D11DeviceContext_PSSetSamplers(d3d11_device_ctx, 0, 1, &dxgigrab->sampler_linear);
     ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_device_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    SetDrawVert(vertices, &clip_rect, OffsetX, OffsetY, desk_desc, &full_desc, &this_desc);
+    SetDrawVert(vertices, &clip_rect, 
+                OffsetX, OffsetY, 
+                desk_desc, &this_desc,
+                dxgigrab->width / 2, dxgigrab->height / 2);
 
     // Create vertex buffer
     RtlZeroMemory(&buffer_desc, sizeof(buffer_desc));
@@ -835,7 +840,7 @@ int DrawFrame(struct dxgigrab* dxgigrab, ID3D11Texture2D* SrcSurface,
 //
 int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_info, 
                     INT* ptr_width, INT* ptr_height, INT* ptr_left, INT* ptr_top, 
-                    BYTE** init_buffer, D3D11_BOX* box)
+                    BYTE** init_buffer, D3D11_BOX* box, INT scale_factor)
 {
     ID3D11Device *d3d11_device = dxgigrab->d3d11_device;
     ID3D11DeviceContext *d3d11_device_ctx = dxgigrab->d3d11_device_ctx;
@@ -844,6 +849,8 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
     INT desktop_height = 0;
     INT given_left = 0;
     INT given_top = 0;
+    UINT given_pointer_width = pointer_info->ShapeInfo.Width / scale_factor;
+    UINT given_pointer_height = pointer_info->ShapeInfo.Height / scale_factor;
     D3D11_TEXTURE2D_DESC copy_buffer_desc;
     ID3D11Texture2D* copy_buffer = NULL;
     IDXGISurface* copy_surface = NULL;
@@ -865,36 +872,36 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
     desktop_height = full_desc.Height;
 
     // Pointer position
-    given_left = pointer_info->Position.x;
-    given_top = pointer_info->Position.y;
+    given_left = pointer_info->Position.x / scale_factor;
+    given_top = pointer_info->Position.y / scale_factor;
 
     // Figure out if any adjustment is needed for out of bound positions
     if (given_left < 0) {
-        *ptr_width = given_left + (INT)(pointer_info->ShapeInfo.Width);
+        *ptr_width = given_left + (INT)given_pointer_width;
     }
-    else if ((given_left + (INT)(pointer_info->ShapeInfo.Width)) > desktop_width) {
+    else if ((given_left + (INT)given_pointer_width) > desktop_width) {
         *ptr_width = desktop_width - given_left;
     }
     else {
-        *ptr_width = (INT)(pointer_info->ShapeInfo.Width);
+        *ptr_width = (INT)given_pointer_width;
     }
 
     if (is_mono) {
-        pointer_info->ShapeInfo.Height = pointer_info->ShapeInfo.Height / 2;
+        given_pointer_height = given_pointer_height / 2;
     }
 
     if (given_top < 0) {
-        *ptr_height = given_top + (INT)(pointer_info->ShapeInfo.Height);
+        *ptr_height = given_top + (INT)given_pointer_height;
     }
-    else if ((given_top + (INT)(pointer_info->ShapeInfo.Height)) > desktop_height) {
+    else if ((given_top + (INT)given_pointer_height) > desktop_height) {
         *ptr_height = desktop_height - given_top;
     }
     else {
-        *ptr_height = (INT)(pointer_info->ShapeInfo.Height);
+        *ptr_height = (INT)given_pointer_height;
     }
 
     if (is_mono) {
-        pointer_info->ShapeInfo.Height = pointer_info->ShapeInfo.Height * 2;
+        given_pointer_height = given_pointer_height * 2;
     }
 
     *ptr_left = (given_left < 0) ? 0 : given_left;
@@ -968,8 +975,8 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
             mask = mask >> (skipX % 8);
             for (INT col = 0; col < *ptr_width; ++col) {
                 // Get masks using appropriate offsets
-                BYTE and_mask = pointer_info->PtrShapeBuffer[((col + skipX) / 8) + ((row + skipY) * (pointer_info->ShapeInfo.Pitch))] & mask;
-                BYTE xor_mask = pointer_info->PtrShapeBuffer[((col + skipX) / 8) + ((row + skipY + (pointer_info->ShapeInfo.Height / 2)) * (pointer_info->ShapeInfo.Pitch))] & mask;
+                BYTE and_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skipX) / 8) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch))] & mask;
+                BYTE xor_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skipX) / 8) + ((row*scale_factor + skipY + ( pointer_info->ShapeInfo.Height / 2)) * (pointer_info->ShapeInfo.Pitch))] & mask;
                 UINT and_mask32 = (and_mask) ? 0xFFFFFFFF : 0xFF000000;
                 UINT XorMask32 = (xor_mask) ? 0x00FFFFFF : 0x00000000;
 
@@ -977,16 +984,18 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
                 init_buffer32[(row * *ptr_width) + col] = (desktop32[(row * desktop_pitch_in_pixels) + col] & and_mask32) ^ XorMask32;
 
                 // Adjust mask
-                if (mask == 0x01) {
-                    mask = 0x80;
-                }
-                else {
-                    mask = mask >> 1;
+                for (INT round = 0; round < scale_factor; ++round) {
+                    if (mask == 0x01) {
+                        mask = 0x80;
+                    }
+                    else {
+                        mask = mask >> 1;
+                    }
                 }
             }
         }
     }
-    else
+    else // what circumstances will it be used ?
     {
         UINT* buffer32 = (UINT*)(pointer_info->PtrShapeBuffer);
 
@@ -994,14 +1003,17 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
         for (INT row = 0; row < *ptr_height; ++row) {
             for (INT col = 0; col < *ptr_width; ++col) {
                 // Set up mask
-                UINT mask_val = 0xFF000000 & buffer32[(col + skipX) + ((row + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))];
+                UINT mask_val = 0xFF000000 & buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))];
                 if (mask_val) {
                     // mask was 0xFF
-                    init_buffer32[(row * *ptr_width) + col] = (desktop32[(row * desktop_pitch_in_pixels) + col] ^ buffer32[(col + skipX) + ((row + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))]) | 0xFF000000;
+                    init_buffer32[(row * *ptr_width) + col] = (desktop32[(row * desktop_pitch_in_pixels) + col] 
+                                                              ^ buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))]) 
+                                                              | 0xFF000000;
                 }
                 else {
                     // mask was 0x00
-                    init_buffer32[(row * *ptr_width) + col] = buffer32[(col + skipX) + ((row + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))] | 0xFF000000;
+                    init_buffer32[(row * *ptr_width) + col] = buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))] 
+                                                              | 0xFF000000;
                 }
             }
         }
@@ -1018,6 +1030,28 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
     return 0;
 }
 
+int ScaleColorTypePointer(BYTE** init_buffer, INT ptr_width, INT ptr_height, 
+                          UINT pointer_pitch, BYTE* shape_buffer, INT scale_factor)
+{
+    UINT* init_buffer32 = NULL;
+    UINT* shape_buffer32 = (UINT32*)shape_buffer;
+    UINT index = 0;
+    // New mouseshape buffer
+    *init_buffer = (BYTE*)malloc(ptr_width * ptr_height * BPP * sizeof(BYTE));
+    if (!(*init_buffer)) {
+      return AVERROR(ENOMEM);
+    }
+    init_buffer32 = (UINT*)(*init_buffer);
+
+    for (int i = 0; i < ptr_height; ++i) {
+      UINT vertical_offset = i * scale_factor * (pointer_pitch / BPP);
+      for (int j = 0; j < ptr_width; ++j) {
+        init_buffer32[index++] = shape_buffer32[vertical_offset + j * scale_factor];
+      }
+    }
+    return 0;
+}
+
 //
 // Draw mouse provided in buffer to backbuffer
 //
@@ -1025,6 +1059,7 @@ int DrawMouse(struct dxgigrab* dxgigrab, PTR_INFO* pointer_info)
 {
     ID3D11Device *d3d11_device = dxgigrab->d3d11_device;
     ID3D11DeviceContext *d3d11_device_ctx = dxgigrab->d3d11_device_ctx;
+    int scale_factor = dxgigrab->down_sample_factor;
     ID3D11Texture2D* mouse_tex = NULL;
     ID3D11ShaderResourceView* shader_res = NULL;
     ID3D11Buffer* vertex_buffer_mouse = NULL;
@@ -1088,24 +1123,35 @@ int DrawMouse(struct dxgigrab* dxgigrab, PTR_INFO* pointer_info)
     switch (pointer_info->ShapeInfo.Type) {
         case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR:
         {
-            ptr_left = pointer_info->Position.x;
-            ptr_top = pointer_info->Position.y;
+            UINT pointer_pitch = pointer_info->ShapeInfo.Pitch;
+            ptr_left = pointer_info->Position.x / scale_factor;
+            ptr_top = pointer_info->Position.y / scale_factor;
 
-            ptr_width = (INT)(pointer_info->ShapeInfo.Width);
-            ptr_height = (INT)(pointer_info->ShapeInfo.Height);
+            ptr_width = (INT)(pointer_info->ShapeInfo.Width) / scale_factor;
+            ptr_height = (INT)(pointer_info->ShapeInfo.Height) / scale_factor;
 
+            if (scale_factor > 1) {
+              int ret = ScaleColorTypePointer(&init_buffer, ptr_width, ptr_height, pointer_pitch,
+                pointer_info->PtrShapeBuffer, scale_factor);
+              if (ret != 0)
+                return ret;
+            }
             break;
         }
 
         case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME:
         {
-            ProcessMonoMask(dxgigrab, TRUE, pointer_info, &ptr_width, &ptr_height, &ptr_left, &ptr_top, &init_buffer, &box);
+            ProcessMonoMask(dxgigrab, TRUE, pointer_info, 
+                            &ptr_width, &ptr_height, &ptr_left, 
+                            &ptr_top, &init_buffer, &box, scale_factor);
             break;
         }
 
         case DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR:
         {
-            ProcessMonoMask(dxgigrab, FALSE, pointer_info, &ptr_width, &ptr_height, &ptr_left, &ptr_top, &init_buffer, &box);
+            ProcessMonoMask(dxgigrab, FALSE, pointer_info, 
+                            &ptr_width, &ptr_height, &ptr_left, 
+                            &ptr_top, &init_buffer, &box, scale_factor);
             break;
         }
 
@@ -1132,8 +1178,8 @@ int DrawMouse(struct dxgigrab* dxgigrab, PTR_INFO* pointer_info)
     desc.Height = ptr_height;
 
     // Set up init data
-    init_data.pSysMem = (pointer_info->ShapeInfo.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR) ? pointer_info->PtrShapeBuffer : init_buffer;
-    init_data.SysMemPitch = (pointer_info->ShapeInfo.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR) ? pointer_info->ShapeInfo.Pitch : ptr_width * BPP;
+    init_data.pSysMem = init_buffer == NULL ? pointer_info->PtrShapeBuffer : init_buffer;
+    init_data.SysMemPitch = init_buffer == NULL ? pointer_info->ShapeInfo.Pitch : ptr_width * BPP;
     init_data.SysMemSlicePitch = 0;
 
     // Create mouseshape as texture
@@ -1220,7 +1266,6 @@ int DoneWithFrame(struct dxgigrab* dxgigrab) {
 int InitNV12Surfaces(struct dxgigrab *dxgigrab) {
   ID3D11Device *d3d11_device = dxgigrab->d3d11_device;
   DXGI_OUTPUT_DESC output_desc = dxgigrab->output_desc;
-  ID3D11Texture2D *scale_src_surf = NULL;
   ID3D11Texture2D *luminance_surf = NULL;
   ID3D11Texture2D *cpu_accessible_luminance_surf = NULL;
   ID3D11Texture2D *cpu_accessible_chrominance_surf = NULL;
@@ -1235,25 +1280,13 @@ int InitNV12Surfaces(struct dxgigrab *dxgigrab) {
 
 
   RtlZeroMemory(&desk_tex_desc, sizeof(D3D11_TEXTURE2D_DESC));
-  desk_tex_desc.Width = dxgigrab->width;
-  desk_tex_desc.Height = dxgigrab->height;
-  desk_tex_desc.MipLevels = 1;
-  desk_tex_desc.ArraySize = 1;
-  desk_tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  desk_tex_desc.SampleDesc.Count = 1;
-  desk_tex_desc.Usage = D3D11_USAGE_DEFAULT;
-  desk_tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-  hr = ID3D11Device_CreateTexture2D(d3d11_device, &desk_tex_desc, NULL, &scale_src_surf);
-  if (FAILED(hr) || !scale_src_surf) {
-      return AVERROR(EIO);
-  }
-
-  // Destination texture may be scaled.
   desk_tex_desc.Width = dxgigrab->scaled_width;
   desk_tex_desc.Height = dxgigrab->scaled_height;
   desk_tex_desc.MipLevels = 1;
-  desk_tex_desc.Format = DXGI_FORMAT_R8_UNORM; 
+  desk_tex_desc.ArraySize = 1;
+  desk_tex_desc.Format = DXGI_FORMAT_R8_UNORM;
+  desk_tex_desc.SampleDesc.Count = 1;
+  desk_tex_desc.Usage = D3D11_USAGE_DEFAULT;
   desk_tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
 
   hr = ID3D11Device_CreateTexture2D(d3d11_device, &desk_tex_desc, NULL, &luminance_surf);
@@ -1322,7 +1355,6 @@ int InitNV12Surfaces(struct dxgigrab *dxgigrab) {
       goto error;
   }
 
-  dxgigrab->scale_src_surf = scale_src_surf;
   dxgigrab->luminance_surf = luminance_surf;
   dxgigrab->cpu_accessible_luminance_surf = cpu_accessible_luminance_surf;
   dxgigrab->cpu_accessible_chrominance_surf = cpu_accessible_chrominance_surf;
@@ -1334,8 +1366,6 @@ int InitNV12Surfaces(struct dxgigrab *dxgigrab) {
   return 0;
 
 error:
-  if (scale_src_surf)
-      ID3D11Texture2D_Release(scale_src_surf);
   if (luminance_surf)
       ID3D11Texture2D_Release(luminance_surf);
   if (cpu_accessible_luminance_surf)
@@ -1358,7 +1388,7 @@ int DrawNV12Frame(struct dxgigrab *dxgigrab) {
   D3D11_TEXTURE2D_DESC frame_desc;
   D3D11_SHADER_RESOURCE_VIEW_DESC shader_desc;
   ID3D11ShaderResourceView* shader_resource = NULL;
-  ID3D11Texture2D *scale_src_surf = dxgigrab->scale_src_surf;
+  ID3D11Texture2D *scale_src_surf = dxgigrab->shared_surf;
   ID3D11Device *d3d11_device = dxgigrab->d3d11_device;
   ID3D11DeviceContext *d3d11_device_ctx = dxgigrab->d3d11_device_ctx;
   ID3D11RenderTargetView  **luminance_RTV = &dxgigrab->luminance_RTV;
@@ -1391,6 +1421,8 @@ int DrawNV12Frame(struct dxgigrab *dxgigrab) {
       return AVERROR(EIO);
   }
 
+  // Unbind target from output slot.
+  ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_ctx, 0, NULL, NULL);
   ID3D11DeviceContext_PSSetShaderResources(d3d11_device_ctx, 0, 1, &shader_resource);
 
   VERTEX vertices[NUMVERTICES] = {
@@ -1624,14 +1656,11 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
             draw_rect.bottom = clip_rect.bottom;
         }
     };
-
     ret = DrawFrame(dxgigrab, 
       current_data.Frame,
       draw_rect,
       clip_rect.left, 
       clip_rect.top);
-
-    DoneWithFrame(dxgigrab);
 
     if (ret != 0) {
         av_log(s1, AV_LOG_ERROR, "Draw frame failed.\n");
@@ -1645,7 +1674,7 @@ static int dxgigrab_read_packet(AVFormatContext *s1, AVPacket *pkt)
       }
     }
 
-    ID3D11DeviceContext_CopyResource(d3d11_device_ctx, dxgigrab->scale_src_surf, dxgigrab->shared_surf);
+    DoneWithFrame(dxgigrab);
 
     if ((ret = DrawNV12Frame(dxgigrab)) != 0) {
         av_log(s1, AV_LOG_ERROR, "Draw NV12 failed.\n");
@@ -1734,10 +1763,6 @@ static int dxgigrab_read_close(AVFormatContext *s1)
     if (s->shared_surf) {
       ref = IDXGIResource_Release(s->shared_surf);
       av_log(s1, AV_LOG_DEBUG, "shared_surf %d\n", ref);
-    }
-    if (s->scale_src_surf) {
-      ref = IDXGIResource_Release(s->scale_src_surf);
-      av_log(s1, AV_LOG_DEBUG, "scale_src_surf %d\n", ref);
     }
     if (s->luminance_surf) {
       ref = IDXGIResource_Release(s->luminance_surf);
