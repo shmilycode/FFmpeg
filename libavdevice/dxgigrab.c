@@ -862,8 +862,8 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
     UINT  desktop_pitch_in_pixels = 0;
 
     // What to skip (pixel offset)
-    UINT skipX = 0;
-    UINT skipY = 0;
+    UINT skip_x = 0;
+    UINT skip_y = 0;
 
 
     // Desktop dimensions
@@ -965,18 +965,18 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
     desktop_pitch_in_pixels = mapped_surface.Pitch / sizeof(UINT);
 
     // What to skip (pixel offset)
-    skipX = (given_left < 0) ? (-1 * given_left) : (0);
-    skipY = (given_top < 0) ? (-1 * given_top) : (0);
+    skip_x = (given_left < 0) ? (-1 * given_left) : (0);
+    skip_y = (given_top < 0) ? (-1 * given_top) : (0);
 
     if (is_mono) {
         for (INT row = 0; row < *ptr_height; ++row) {
             // Set mask
             BYTE mask = 0x80;
-            mask = mask >> (skipX % 8);
+            mask = mask >> (skip_x % 8);
             for (INT col = 0; col < *ptr_width; ++col) {
                 // Get masks using appropriate offsets
-                BYTE and_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skipX) / 8) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch))] & mask;
-                BYTE xor_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skipX) / 8) + ((row*scale_factor + skipY + ( pointer_info->ShapeInfo.Height / 2)) * (pointer_info->ShapeInfo.Pitch))] & mask;
+                BYTE and_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skip_x) / 8) + ((row*scale_factor + skip_y) * (pointer_info->ShapeInfo.Pitch))] & mask;
+                BYTE xor_mask = pointer_info->PtrShapeBuffer[((col*scale_factor + skip_x) / 8) + ((row*scale_factor + skip_y + ( pointer_info->ShapeInfo.Height / 2)) * (pointer_info->ShapeInfo.Pitch))] & mask;
                 UINT and_mask32 = (and_mask) ? 0xFFFFFFFF : 0xFF000000;
                 UINT XorMask32 = (xor_mask) ? 0x00FFFFFF : 0x00000000;
 
@@ -1003,17 +1003,16 @@ int ProcessMonoMask(struct dxgigrab* dxgigrab, BOOL is_mono, PTR_INFO* pointer_i
         for (INT row = 0; row < *ptr_height; ++row) {
             for (INT col = 0; col < *ptr_width; ++col) {
                 // Set up mask
-                UINT mask_val = 0xFF000000 & buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))];
+                UINT mask_val = 0xFF000000 & buffer32[(col*scale_factor + skip_x) + ((row*scale_factor + skip_y) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))];
                 if (mask_val) {
                     // mask was 0xFF
-                    init_buffer32[(row * *ptr_width) + col] = (desktop32[(row * desktop_pitch_in_pixels) + col] 
-                                                              ^ buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))]) 
-                                                              | 0xFF000000;
+                    init_buffer32[(row * *ptr_width) + col] = (desktop32[(row * desktop_pitch_in_pixels) + col] ^ 
+                            buffer32[(col*scale_factor + skip_x) + ((row*scale_factor + skip_y) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))]) | 
+                            0xFF000000;
                 }
                 else {
                     // mask was 0x00
-                    init_buffer32[(row * *ptr_width) + col] = buffer32[(col*scale_factor + skipX) + ((row*scale_factor + skipY) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))] 
-                                                              | 0xFF000000;
+                    init_buffer32[(row * *ptr_width) + col] = buffer32[(col*scale_factor + skip_x) + ((row*scale_factor + skip_y) * (pointer_info->ShapeInfo.Pitch / sizeof(UINT)))] | 0xFF000000;
                 }
             }
         }
