@@ -289,7 +289,7 @@ static int decode_frame_header(ProresContext *ctx, const uint8_t *buf,
         }
         permute(ctx->qmat_chroma, ctx->prodsp.idct_permutation, ptr);
     } else {
-        memset(ctx->qmat_chroma, 4, 64);
+        memcpy(ctx->qmat_chroma, ctx->qmat_luma, 64);
     }
 
     return hdr_size;
@@ -778,15 +778,16 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     buf += frame_hdr_size;
     buf_size -= frame_hdr_size;
 
-    if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
-        return ret;
-
  decode_picture:
     pic_size = decode_picture_header(avctx, buf, buf_size);
     if (pic_size < 0) {
         av_log(avctx, AV_LOG_ERROR, "error decoding picture header\n");
         return pic_size;
     }
+
+    if (ctx->first_field)
+        if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
+            return ret;
 
     if ((ret = decode_picture(avctx)) < 0) {
         av_log(avctx, AV_LOG_ERROR, "error decoding picture\n");
@@ -806,17 +807,6 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     return avpkt->size;
 }
 
-#if HAVE_THREADS
-static int decode_init_thread_copy(AVCodecContext *avctx)
-{
-    ProresContext *ctx = avctx->priv_data;
-
-    ctx->slices = NULL;
-
-    return 0;
-}
-#endif
-
 static av_cold int decode_close(AVCodecContext *avctx)
 {
     ProresContext *ctx = avctx->priv_data;
@@ -828,12 +818,11 @@ static av_cold int decode_close(AVCodecContext *avctx)
 
 AVCodec ff_prores_decoder = {
     .name           = "prores",
-    .long_name      = NULL_IF_CONFIG_SMALL("ProRes (iCodec Pro)"),
+    .long_name      = NULL_IF_CONFIG_SMALL("Apple ProRes (iCodec Pro)"),
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_PRORES,
     .priv_data_size = sizeof(ProresContext),
     .init           = decode_init,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(decode_init_thread_copy),
     .close          = decode_close,
     .decode         = decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_SLICE_THREADS | AV_CODEC_CAP_FRAME_THREADS,

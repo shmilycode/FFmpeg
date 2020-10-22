@@ -214,10 +214,10 @@ static av_cold void qdmc_init_static_data(void)
     INIT_VLC_STATIC_LE(&vtable[1], 10, FF_ARRAY_ELEMS(noise_segment_length_bits),
                        noise_segment_length_bits, 1, 1, noise_segment_length_codes, 2, 2,
                        noise_segment_length_symbols, 1, 1, 1024);
-    INIT_VLC_STATIC_LE(&vtable[2], 13, FF_ARRAY_ELEMS(amplitude_bits),
-                       amplitude_bits, 1, 1, amplitude_codes, 2, 2, NULL, 0, 0, 8192);
-    INIT_VLC_STATIC_LE(&vtable[3], 18, FF_ARRAY_ELEMS(freq_diff_bits),
-                       freq_diff_bits, 1, 1, freq_diff_codes, 4, 4, NULL, 0, 0, 262144);
+    INIT_VLC_STATIC_LE(&vtable[2], 12, FF_ARRAY_ELEMS(amplitude_bits),
+                       amplitude_bits, 1, 1, amplitude_codes, 2, 2, NULL, 0, 0, 4098);
+    INIT_VLC_STATIC_LE(&vtable[3], 12, FF_ARRAY_ELEMS(freq_diff_bits),
+                       freq_diff_bits, 1, 1, freq_diff_codes, 4, 4, NULL, 0, 0, 4160);
     INIT_VLC_STATIC_LE(&vtable[4], 8, FF_ARRAY_ELEMS(amplitude_diff_bits),
                        amplitude_diff_bits, 1, 1, amplitude_diff_codes, 1, 1, NULL, 0, 0, 256);
     INIT_VLC_STATIC_LE(&vtable[5], 6, FF_ARRAY_ELEMS(phase_diff_bits),
@@ -367,7 +367,9 @@ static int qdmc_get_vlc(GetBitContext *gb, VLC *table, int flag)
 {
     int v;
 
-    v = get_vlc2(gb, table->table, table->bits, 1);
+    if (get_bits_left(gb) < 1)
+        return AVERROR_INVALIDDATA;
+    v = get_vlc2(gb, table->table, table->bits, 2);
     if (v < 0)
         return AVERROR_INVALIDDATA;
     if (v)
@@ -577,9 +579,9 @@ static void add_noise(QDMCContext *s, int ch, int current_subframe)
     for (j = 2; j < s->subframe_size - 1; j++) {
         float rnd_re, rnd_im;
 
-        s->rndval = 214013 * s->rndval + 2531011;
+        s->rndval = 214013U * s->rndval + 2531011;
         rnd_im = ((s->rndval & 0x7FFF) - 16384.0f) * 0.000030517578f * s->noise2_buffer[j];
-        s->rndval = 214013 * s->rndval + 2531011;
+        s->rndval = 214013U * s->rndval + 2531011;
         rnd_re = ((s->rndval & 0x7FFF) - 16384.0f) * 0.000030517578f * s->noise2_buffer[j];
         im[j  ] += rnd_im;
         re[j  ] += rnd_re;

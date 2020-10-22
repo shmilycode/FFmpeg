@@ -240,8 +240,8 @@ FF_ENABLE_DEPRECATION_WARNINGS
                 tprev = prev + x * c->bypp;
 
                 zmbv_me(c, tsrc, p->linesize[0], tprev, c->pstride, x, y, &mx, &my, &xored);
-                mv[0] = (mx << 1) | !!xored;
-                mv[1] = my << 1;
+                mv[0] = (mx * 2) | !!xored;
+                mv[1] = my * 2;
                 tprev += mx * c->bypp + my * c->pstride;
                 if(xored){
                     for(j = 0; j < bh2; j++){
@@ -340,6 +340,12 @@ static av_cold int encode_init(AVCodecContext *avctx)
         c->fmt = ZMBV_FMT_16BPP;
         c->bypp = 2;
         break;
+#ifdef ZMBV_ENABLE_24BPP
+    case AV_PIX_FMT_BGR24:
+        c->fmt = ZMBV_FMT_24BPP;
+        c->bypp = 3;
+        break;
+#endif //ZMBV_ENABLE_24BPP
     case AV_PIX_FMT_BGR0:
         c->fmt = ZMBV_FMT_32BPP;
         c->bypp = 4;
@@ -403,7 +409,7 @@ static av_cold int encode_init(AVCodecContext *avctx)
      */
     c->pstride = FFALIGN((avctx->width + c->lrange) * c->bypp, 16);
     prev_size = FFALIGN(c->lrange * c->bypp, 16) + c->pstride * (c->lrange + avctx->height + c->urange);
-    prev_offset = FFALIGN(c->lrange, 16) + c->pstride * c->lrange;
+    prev_offset = FFALIGN(c->lrange * c->bypp, 16) + c->pstride * c->lrange;
     if (!(c->prev_buf = av_mallocz(prev_size))) {
         av_log(avctx, AV_LOG_ERROR, "Can't allocate picture.\n");
         return AVERROR(ENOMEM);
@@ -434,6 +440,9 @@ AVCodec ff_zmbv_encoder = {
     .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_PAL8,
                                                      AV_PIX_FMT_RGB555LE,
                                                      AV_PIX_FMT_RGB565LE,
+#ifdef ZMBV_ENABLE_24BPP
+                                                     AV_PIX_FMT_BGR24,
+#endif //ZMBV_ENABLE_24BPP
                                                      AV_PIX_FMT_BGR0,
                                                      AV_PIX_FMT_NONE },
 };

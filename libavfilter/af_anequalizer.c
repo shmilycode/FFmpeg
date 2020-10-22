@@ -192,35 +192,23 @@ static av_cold int init(AVFilterContext *ctx)
     int ret;
 
     pad = (AVFilterPad){
-        .name         = av_strdup("out0"),
+        .name         = "out0",
         .type         = AVMEDIA_TYPE_AUDIO,
     };
 
-    if (!pad.name)
-        return AVERROR(ENOMEM);
+    ret = ff_insert_outpad(ctx, 0, &pad);
+    if (ret < 0)
+        return ret;
 
     if (s->draw_curves) {
         vpad = (AVFilterPad){
-            .name         = av_strdup("out1"),
+            .name         = "out1",
             .type         = AVMEDIA_TYPE_VIDEO,
             .config_props = config_video,
         };
-        if (!vpad.name)
-            return AVERROR(ENOMEM);
-    }
-
-    ret = ff_insert_outpad(ctx, 0, &pad);
-    if (ret < 0) {
-        av_freep(&pad.name);
-        return ret;
-    }
-
-    if (s->draw_curves) {
         ret = ff_insert_outpad(ctx, 1, &vpad);
-        if (ret < 0) {
-            av_freep(&vpad.name);
+        if (ret < 0)
             return ret;
-        }
     }
 
     return 0;
@@ -243,23 +231,23 @@ static int query_formats(AVFilterContext *ctx)
     if (s->draw_curves) {
         AVFilterLink *videolink = ctx->outputs[1];
         formats = ff_make_format_list(pix_fmts);
-        if ((ret = ff_formats_ref(formats, &videolink->in_formats)) < 0)
+        if ((ret = ff_formats_ref(formats, &videolink->incfg.formats)) < 0)
             return ret;
     }
 
     formats = ff_make_format_list(sample_fmts);
-    if ((ret = ff_formats_ref(formats, &inlink->out_formats)) < 0 ||
-        (ret = ff_formats_ref(formats, &outlink->in_formats)) < 0)
+    if ((ret = ff_formats_ref(formats, &inlink->outcfg.formats)) < 0 ||
+        (ret = ff_formats_ref(formats, &outlink->incfg.formats)) < 0)
         return ret;
 
     layouts = ff_all_channel_counts();
-    if ((ret = ff_channel_layouts_ref(layouts, &inlink->out_channel_layouts)) < 0 ||
-        (ret = ff_channel_layouts_ref(layouts, &outlink->in_channel_layouts)) < 0)
+    if ((ret = ff_channel_layouts_ref(layouts, &inlink->outcfg.channel_layouts)) < 0 ||
+        (ret = ff_channel_layouts_ref(layouts, &outlink->incfg.channel_layouts)) < 0)
         return ret;
 
     formats = ff_all_samplerates();
-    if ((ret = ff_formats_ref(formats, &inlink->out_samplerates)) < 0 ||
-        (ret = ff_formats_ref(formats, &outlink->in_samplerates)) < 0)
+    if ((ret = ff_formats_ref(formats, &inlink->outcfg.samplerates)) < 0 ||
+        (ret = ff_formats_ref(formats, &outlink->incfg.samplerates)) < 0)
         return ret;
 
     return 0;
@@ -269,8 +257,6 @@ static av_cold void uninit(AVFilterContext *ctx)
 {
     AudioNEqualizerContext *s = ctx->priv;
 
-    for (int i = 0; i < ctx->nb_outputs; i++)
-        av_freep(&ctx->output_pads[i].name);
     av_frame_free(&s->video);
     av_freep(&s->filters);
     s->nb_filters = 0;
@@ -564,7 +550,7 @@ static void equalizer(EqualizatorFilter *f, double sample_rate)
 static int add_filter(AudioNEqualizerContext *s, AVFilterLink *inlink)
 {
     equalizer(&s->filters[s->nb_filters], inlink->sample_rate);
-    if (s->nb_filters >= s->nb_allocated) {
+    if (s->nb_filters >= s->nb_allocated - 1) {
         EqualizatorFilter *filters;
 
         filters = av_calloc(s->nb_allocated, 2 * sizeof(*s->filters));
@@ -731,13 +717,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *buf)
     }
 
     if (s->draw_curves) {
+        AVFrame *clone;
+
         const int64_t pts = buf->pts +
             av_rescale_q(buf->nb_samples, (AVRational){ 1, inlink->sample_rate },
                          outlink->time_base);
         int ret;
 
         s->video->pts = pts;
-        ret = ff_filter_frame(ctx->outputs[1], av_frame_clone(s->video));
+        clone = av_frame_clone(s->video);
+        if (!clone)
+            return AVERROR(ENOMEM);
+        ret = ff_filter_frame(ctx->outputs[1], clone);
         if (ret < 0)
             return ret;
     }

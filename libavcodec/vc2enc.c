@@ -780,7 +780,6 @@ static int encode_slices(VC2EncContext *s)
     int slice_x, slice_y, skip = 0;
     SliceArgs *enc_args = s->slice_args;
 
-    avpriv_align_put_bits(&s->pb);
     flush_put_bits(&s->pb);
     buf = put_bits_ptr(&s->pb);
 
@@ -867,6 +866,7 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
             for (x = 0; x < p->width; x++) {
                 buf[x] = pix[x] - s->diff_offset;
             }
+            memset(&buf[x], 0, (p->coef_stride - p->width)*sizeof(dwtcoef));
             buf += p->coef_stride;
             pix += pix_stride;
         }
@@ -876,6 +876,7 @@ static int dwt_plane(AVCodecContext *avctx, void *arg)
             for (x = 0; x < p->width; x++) {
                 buf[x] = pix[x] - s->diff_offset;
             }
+            memset(&buf[x], 0, (p->coef_stride - p->width)*sizeof(dwtcoef));
             buf += p->coef_stride;
             pix += pix_stride;
         }

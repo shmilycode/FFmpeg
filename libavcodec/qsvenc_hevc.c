@@ -107,6 +107,7 @@ static int generate_fake_vps(QSVEncContext *q, AVCodecContext *avctx)
     /* generate the VPS */
     vps.vps_max_layers     = 1;
     vps.vps_max_sub_layers = sps.max_sub_layers;
+    vps.vps_temporal_id_nesting_flag = sps.temporal_id_nesting_flag;
     memcpy(&vps.ptl, &sps.ptl, sizeof(vps.ptl));
     vps.vps_sub_layer_ordering_info_present_flag = 1;
     for (i = 0; i < HEVC_MAX_SUB_LAYERS; i++) {
@@ -121,6 +122,7 @@ static int generate_fake_vps(QSVEncContext *q, AVCodecContext *avctx)
     vps.vps_time_scale                      = sps.vui.vui_time_scale;
     vps.vps_poc_proportional_to_timing_flag = sps.vui.vui_poc_proportional_to_timing_flag;
     vps.vps_num_ticks_poc_diff_one          = sps.vui.vui_num_ticks_poc_diff_one_minus1 + 1;
+    vps.vps_num_hrd_parameters              = 0;
 
     /* generate the encoded RBSP form of the VPS */
     ret = ff_hevc_encode_nal_vps(&vps, sps.vps_id, vps_rbsp_buf, sizeof(vps_rbsp_buf));
@@ -138,8 +140,7 @@ static int generate_fake_vps(QSVEncContext *q, AVCodecContext *avctx)
     bytestream2_put_byte(&pbc, 1);                 // header
 
     while (bytestream2_get_bytes_left(&gbc)) {
-        uint32_t b = bytestream2_peek_be24(&gbc);
-        if (b <= 3) {
+        if (bytestream2_get_bytes_left(&gbc) >= 3 && bytestream2_peek_be24(&gbc) <= 3) {
             bytestream2_put_be24(&pbc, 3);
             bytestream2_skip(&gbc, 2);
         } else
@@ -193,10 +194,12 @@ static av_cold int qsv_enc_init(AVCodecContext *avctx)
     if (ret < 0)
         return ret;
 
-    ret = generate_fake_vps(&q->qsv, avctx);
-    if (ret < 0) {
-        ff_qsv_enc_close(avctx, &q->qsv);
-        return ret;
+    if (!q->qsv.hevc_vps) {
+        ret = generate_fake_vps(&q->qsv, avctx);
+        if (ret < 0) {
+            ff_qsv_enc_close(avctx, &q->qsv);
+            return ret;
+        }
     }
 
     return 0;
@@ -237,6 +240,12 @@ static const AVOption options[] = {
     { "main",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MFX_PROFILE_HEVC_MAIN    }, INT_MIN, INT_MAX,     VE, "profile" },
     { "main10",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MFX_PROFILE_HEVC_MAIN10  }, INT_MIN, INT_MAX,     VE, "profile" },
     { "mainsp",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MFX_PROFILE_HEVC_MAINSP  }, INT_MIN, INT_MAX,     VE, "profile" },
+    { "rext",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MFX_PROFILE_HEVC_REXT    }, INT_MIN, INT_MAX,     VE, "profile" },
+
+    { "gpb", "1: GPB (generalized P/B frame); 0: regular P frame", OFFSET(qsv.gpb), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VE},
+
+    { "tile_cols",  "Number of columns for tiled encoding",   OFFSET(qsv.tile_cols),    AV_OPT_TYPE_INT, { .i64 = 0 }, 0, UINT16_MAX, VE },
+    { "tile_rows",  "Number of rows for tiled encoding",      OFFSET(qsv.tile_rows),    AV_OPT_TYPE_INT, { .i64 = 0 }, 0, UINT16_MAX, VE },
 
     { NULL },
 };
@@ -254,7 +263,9 @@ static const AVCodecDefault qsv_enc_defaults[] = {
     // same as the x264 default
     { "g",         "248"   },
     { "bf",        "8"     },
-
+    { "qmin",      "-1"    },
+    { "qmax",      "-1"    },
+    { "trellis",   "-1"    },
     { "flags",     "+cgop" },
 #if FF_API_PRIVATE_OPT
     { "b_strategy", "-1"   },
@@ -280,4 +291,5 @@ AVCodec ff_hevc_qsv_encoder = {
     .defaults       = qsv_enc_defaults,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .wrapper_name   = "qsv",
+    .hw_configs     = ff_qsv_enc_hw_configs,
 };

@@ -136,7 +136,7 @@ static void gif_crop_translucent(AVCodecContext *avctx,
         while (*y_start < y_end) {
             int is_trans = 1;
             for (int i = 0; i < w; i++) {
-                if (buf[w * *y_start + i] != trans) {
+                if (buf[linesize * *y_start + i] != trans) {
                     is_trans = 0;
                     break;
                 }
@@ -148,10 +148,10 @@ static void gif_crop_translucent(AVCodecContext *avctx,
         }
 
         // crop bottom
-        while (y_end < h) {
+        while (y_end > *y_start) {
             int is_trans = 1;
             for (int i = 0; i < w; i++) {
-                if (buf[w * y_end + i] != trans) {
+                if (buf[linesize * y_end + i] != trans) {
                     is_trans = 0;
                     break;
                 }
@@ -165,7 +165,7 @@ static void gif_crop_translucent(AVCodecContext *avctx,
         while (*x_start < x_end) {
             int is_trans = 1;
             for (int i = *y_start; i < y_end; i++) {
-                if (buf[w * i + *x_start] != trans) {
+                if (buf[linesize * i + *x_start] != trans) {
                     is_trans = 0;
                     break;
                 }
@@ -176,10 +176,10 @@ static void gif_crop_translucent(AVCodecContext *avctx,
         }
 
         // crop right
-        while (x_end < w) {
+        while (x_end > *x_start) {
             int is_trans = 1;
             for (int i = *y_start; i < y_end; i++) {
-                if (buf[w * i + x_end] != trans) {
+                if (buf[linesize * i + x_end] != trans) {
                     is_trans = 0;
                     break;
                 }
@@ -267,7 +267,7 @@ static int gif_image_write_image(AVCodecContext *avctx,
     int bcid = -1, honor_transparency = (s->flags & GF_TRANSDIFF) && s->last_frame && !palette;
     const uint8_t *ptr;
 
-    if (!s->image && avctx->frame_number && is_image_translucent(avctx, buf, linesize)) {
+    if (!s->image && is_image_translucent(avctx, buf, linesize)) {
         gif_crop_translucent(avctx, buf, linesize, &width, &height, &x_start, &y_start);
         honor_transparency = 0;
         disposal = GCE_DISPOSAL_BACKGROUND;
@@ -344,7 +344,7 @@ static int gif_image_write_image(AVCodecContext *avctx,
     bytestream_put_byte(bytestream, 0x08);
 
     ff_lzw_encode_init(s->lzw, s->buf, s->buf_size,
-                       12, FF_LZW_GIF, put_bits);
+                       12, FF_LZW_GIF, 1);
 
     ptr = buf + y_start*linesize + x_start;
     if (honor_transparency) {
@@ -366,7 +366,7 @@ static int gif_image_write_image(AVCodecContext *avctx,
             ptr += linesize;
         }
     }
-    len += ff_lzw_encode_flush(s->lzw, flush_put_bits);
+    len += ff_lzw_encode_flush(s->lzw);
 
     ptr = s->buf;
     while (len > 0) {
@@ -472,7 +472,7 @@ static const AVOption gif_options[] = {
     { "gifflags", "set GIF flags", OFFSET(flags), AV_OPT_TYPE_FLAGS, {.i64 = GF_OFFSETTING|GF_TRANSDIFF}, 0, INT_MAX, FLAGS, "flags" },
         { "offsetting", "enable picture offsetting", 0, AV_OPT_TYPE_CONST, {.i64=GF_OFFSETTING}, INT_MIN, INT_MAX, FLAGS, "flags" },
         { "transdiff", "enable transparency detection between frames", 0, AV_OPT_TYPE_CONST, {.i64=GF_TRANSDIFF}, INT_MIN, INT_MAX, FLAGS, "flags" },
-    { "gifimage", "enable encoding only images per frame", OFFSET(image), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS, "flags" },
+    { "gifimage", "enable encoding only images per frame", OFFSET(image), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -497,4 +497,5 @@ AVCodec ff_gif_encoder = {
         AV_PIX_FMT_GRAY8, AV_PIX_FMT_PAL8, AV_PIX_FMT_NONE
     },
     .priv_class     = &gif_class,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

@@ -289,11 +289,9 @@ static int rtsp_read_setup(AVFormatContext *s, char* host, char *controlurl)
     } else {
         do {
             AVDictionary *opts = NULL;
-            char buf[256];
-            snprintf(buf, sizeof(buf), "%d", rt->buffer_size);
-            av_dict_set(&opts, "buffer_size", buf, 0);
+            av_dict_set_int(&opts, "buffer_size", rt->buffer_size, 0);
             ff_url_join(url, sizeof(url), "rtp", NULL, host, localport, NULL);
-            av_log(s, AV_LOG_TRACE, "Opening: %s", url);
+            av_log(s, AV_LOG_TRACE, "Opening: %s\n", url);
             ret = ffurl_open_whitelist(&rtsp_st->rtp_handle, url, AVIO_FLAG_READ_WRITE,
                                        &s->interrupt_callback, &opts,
                                        s->protocol_whitelist, s->protocol_blacklist, NULL);
@@ -306,7 +304,7 @@ static int rtsp_read_setup(AVFormatContext *s, char* host, char *controlurl)
             return ret;
         }
 
-        av_log(s, AV_LOG_TRACE, "Listening on: %d",
+        av_log(s, AV_LOG_TRACE, "Listening on: %d\n",
                 ff_rtp_get_local_rtp_port(rtsp_st->rtp_handle));
         if ((ret = ff_rtsp_open_transport_ctx(s, rtsp_st))) {
             rtsp_send_reply(s, RTSP_STATUS_TRANSPORT, NULL, request.seq);
