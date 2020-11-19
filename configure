@@ -3119,6 +3119,7 @@ oss_indev_deps_any="soundcard_h sys_soundcard_h"
 oss_outdev_deps_any="soundcard_h sys_soundcard_h"
 pulse_indev_deps="libpulse"
 pulse_outdev_deps="libpulse"
+was_indev_deps="CoCreateInstance"
 sdl2_outdev_deps="sdl2"
 sndio_indev_deps="sndio"
 sndio_outdev_deps="sndio"
@@ -6223,6 +6224,8 @@ fi
 check_func_headers "windows.h" CreateDIBSection "$gdigrab_indev_extralibs"
 
 check_func_headers "d3d11.h" D3D11CreateDevice "$dxgigrab_indev_extralibs"
+
+check_func_headers "windows.h" CoCreateInstance ""
 
 # d3d11va requires linking directly to dxgi and d3d11 if not building for
 # the desktop api partition

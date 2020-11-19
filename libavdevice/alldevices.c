@@ -59,6 +59,7 @@ static void register_all(void)
     REGISTER_OUTDEV  (OPENGL,           opengl);
     REGISTER_INOUTDEV(OSS,              oss);
     REGISTER_INOUTDEV(PULSE,            pulse);
+    REGISTER_INDEV   (WAS,              was);
     REGISTER_OUTDEV  (SDL2,             sdl2);
     REGISTER_INOUTDEV(SNDIO,            sndio);
     REGISTER_INOUTDEV(V4L2,             v4l2);
