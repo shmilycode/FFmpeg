@@ -18,6 +18,7 @@ typedef struct WASData {
     int  block_size;
     int loopback;
     int record_start;
+    int buffer_size;
 
     IMMDevice *device;
     IAudioClient *audio_client;
@@ -484,12 +485,15 @@ static av_cold int was_read_header(AVFormatContext *s)
   GOTO_FAIL_IF_ERROR(hr, "IAudioClient_Initialize");
 
   hr = IAudioClient_GetBufferSize(audio_client, &buffer_frame_count);
-  if (SUCCEEDED(hr)) {
-    av_log(s, AV_LOG_DEBUG, "Buffer size => %u (<=> %u bytes)",   
-        buffer_frame_count, 
-        buffer_frame_count * pd->frame_size);
-  }
+  GOTO_FAIL_IF_ERROR(hr, "IAudioClient_GetBufferSize");
 
+  pd->buffer_size = buffer_frame_count * pd->frame_size;
+  av_log(s, AV_LOG_DEBUG, "Buffer size => %u (<=> %u bytes)",
+      buffer_frame_count,
+      pd->buffer_size);
+
+  if (pd->buffer_size <= 0)
+    goto fail;
 
   // Set the event handle that the system signals when an audio buffer is ready
   // to be processed by the client.
@@ -560,13 +564,16 @@ static int was_read_packet(AVFormatContext *s, AVPacket *pkt)
   IAudioClient *audio_client = pd->audio_client;
   IAudioCaptureClient *capture_client = pd->capture_client;
   int dw_milliseconds = 500;
-  BYTE* data = 0;
+  BYTE *data = 0;
   UINT32 frames_available = 0;
   DWORD flags = 0;
   UINT64 record_time = 0;
   UINT64 record_position = 0;
   DWORD wait_result = 0;
   size_t read_length;
+  int max_buffer_size = pd->buffer_size * 3;
+  uint8_t *pkt_data = NULL;
+  int pkt_size = 0;
 
   if (!record_start) {
       hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -579,6 +586,12 @@ static int was_read_packet(AVFormatContext *s, AVPacket *pkt)
       record_start = 1;
       pd->record_start = record_start;
   }
+
+  if (av_new_packet(pkt, max_buffer_size) < 0) {
+      ret = AVERROR(ENOMEM);
+      goto fail;
+  }
+  pkt_data = pkt->data;
 
   while(record_start) {
       // get audio data
@@ -596,48 +609,55 @@ static int was_read_packet(AVFormatContext *s, AVPacket *pkt)
           goto fail;
       } //wait_result
 
-      //  Find out how much capture data is available
-      //
-      hr = IAudioCaptureClient_GetBuffer(
-          capture_client,
-          &data,            // packet which is ready to be read by used
-          &frames_available,  // #frames in the captured packet (can be zero)
-          &flags,            // support flags (check)
-          &record_position,    // device position of first audio frame in data packet
-          &record_time);  // value of performance counter at the time of recording the first audio frame
-      GOTO_FAIL_IF_ERROR(hr, "IAudioCaptureClient_GetBuffer");
+      UINT32 next_packet_size = 0;
+      for (hr = IAudioCaptureClient_GetNextPacketSize(pd->capture_client, &next_packet_size);
+          SUCCEEDED(hr) && 
+          next_packet_size > 0 && 
+          pkt_size + next_packet_size*pd->frame_size <= max_buffer_size;
+          hr = IAudioCaptureClient_GetNextPacketSize(pd->capture_client, &next_packet_size))
+      {
+          //  Find out how much capture data is available
+          //
+          hr = IAudioCaptureClient_GetBuffer(
+              capture_client,
+              &data,            // packet which is ready to be read by used
+              &frames_available,  // #frames in the captured packet (can be zero)
+              &flags,            // support flags (check)
+              &record_position,    // device position of first audio frame in data packet
+              &record_time);  // value of performance counter at the time of recording the first audio frame
+          GOTO_FAIL_IF_ERROR(hr, "IAudioCaptureClient_GetBuffer");
 
-      if (AUDCLNT_S_BUFFER_EMPTY == hr) {
-        // Buffer was empty => start waiting for a new capture notification
-        // event
-        continue;
+          if (AUDCLNT_S_BUFFER_EMPTY == hr) {
+            // Buffer was empty => start waiting for a new capture notification
+            // event
+            continue;
+          }
+
+          if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+            // Treat all of the data in the packet as silence and ignore the
+            // actual data values.
+            av_log(s, AV_LOG_WARNING, "AUDCLNT_BUFFERFLAGS_SILENT\n");
+            data = NULL;
+          }
+
+          read_length = frames_available * pd->frame_size;
+          if (data) {
+            CopyMemory(pkt_data, data, read_length);
+          } else {
+            ZeroMemory(pkt_data, read_length);
+          }
+          pkt_data += read_length;
+          pkt_size += read_length;
+
+          // Release the capture buffer
+          //
+          hr = IAudioCaptureClient_ReleaseBuffer(capture_client, frames_available);
+          if (FAILED(hr)) {
+            av_log(s, AV_LOG_WARNING, "IAudioCaptureClient_ReleaseBuffer failed, hr = 0x%08x\n", hr);
+          }
       }
 
-      if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-        // Treat all of the data in the packet as silence and ignore the
-        // actual data values.
-        av_log(s, AV_LOG_WARNING, "AUDCLNT_BUFFERFLAGS_SILENT\n");
-        data = NULL;
-      }
-
-      read_length = frames_available * pd->frame_size;
-      if (av_new_packet(pkt, read_length) < 0) {
-          ret = AVERROR(ENOMEM);
-          goto fail;
-      }
-
-      if (data) {
-        CopyMemory(pkt->data, data, read_length);
-      } else {
-        ZeroMemory(pkt->data, read_length);
-      }
-
-      // Release the capture buffer
-      //
-      hr = IAudioCaptureClient_ReleaseBuffer(capture_client, frames_available);
-      if (FAILED(hr)) {
-        av_log(s, AV_LOG_WARNING, "IAudioCaptureClient_ReleaseBuffer failed, hr = 0x%08x\n", hr);
-      }
+      pkt->size = pkt_size;
       break;
   }
   return 0;
