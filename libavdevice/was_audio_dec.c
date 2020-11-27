@@ -308,7 +308,6 @@ static IMMDevice *get_device_by_id(AVFormatContext *s, IMMDeviceCollection* coll
                 av_log(s, AV_LOG_ERROR, "WideCharToMultiByte(CP_UTF8) failed with error code %d\n", GetLastError());
             }
             // found it
-            av_log(s, AV_LOG_ERROR, "%s\n", szDeviceNameUtf8);
             if (strncmp(szDeviceNameUtf8, id, MAX_PATH) == 0) {
                 return pMMDevice;
             }
