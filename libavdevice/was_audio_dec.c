@@ -208,6 +208,7 @@ static int was_get_device_list(AVFormatContext *s, AVDeviceInfoList *device_list
     const int bufferLen = sizeof(szDeviceName) / sizeof(szDeviceName)[0];
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    GOTO_FAIL_IF_ERROR(hr, "CoInitializeEx");
 
     device_list->nb_devices = 0;
     device_list->devices = NULL;
@@ -353,6 +354,7 @@ static av_cold int was_read_header(AVFormatContext *s)
   }
 
   hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  GOTO_FAIL_IF_ERROR(hr, "CoInitializeEx");
 
   capture_samples_ready_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
