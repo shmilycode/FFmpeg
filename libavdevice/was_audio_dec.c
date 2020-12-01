@@ -208,7 +208,9 @@ static int was_get_device_list(AVFormatContext *s, AVDeviceInfoList *device_list
     const int bufferLen = sizeof(szDeviceName) / sizeof(szDeviceName)[0];
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    GOTO_FAIL_IF_ERROR(hr, "CoInitializeEx");
+    if (FAILED(hr)) {
+      av_log(s, AV_LOG_WARNING, "CoInitializeEx failed, hr = 0x%08x\n", hr);
+    }
 
     device_list->nb_devices = 0;
     device_list->devices = NULL;
@@ -354,7 +356,9 @@ static av_cold int was_read_header(AVFormatContext *s)
   }
 
   hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  GOTO_FAIL_IF_ERROR(hr, "CoInitializeEx");
+  if (FAILED(hr)) {
+    av_log(s, AV_LOG_WARNING, "CoInitializeEx failed, hr = 0x%08x\n", hr);
+  }
 
   capture_samples_ready_event = CreateEvent(NULL, FALSE, FALSE, NULL);
 
@@ -489,7 +493,7 @@ static av_cold int was_read_header(AVFormatContext *s)
   GOTO_FAIL_IF_ERROR(hr, "IAudioClient_GetBufferSize");
 
   pd->buffer_size = buffer_frame_count * pd->frame_size;
-  av_log(s, AV_LOG_DEBUG, "Buffer size => %u (<=> %u bytes)",
+  av_log(s, AV_LOG_DEBUG, "Buffer size => %u (<=> %u bytes)\n",
       buffer_frame_count,
       pd->buffer_size);
 
@@ -579,8 +583,7 @@ static int was_read_packet(AVFormatContext *s, AVPacket *pkt)
   if (!record_start) {
       hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
       if (FAILED(hr)) {
-        av_log(s, AV_LOG_ERROR, "CoInitializeEx failed, hr = 0x%08x", hr); \
-        return AVERROR_EXTERNAL;
+        av_log(s, AV_LOG_WARNING, "CoInitializeEx failed, hr = 0x%08x\n", hr);
       }
       hr = IAudioClient_Start(audio_client);
       GOTO_FAIL_IF_ERROR(hr, "IAudioClient_Start");
