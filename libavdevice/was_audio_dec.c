@@ -637,7 +637,6 @@ static int was_read_packet(AVFormatContext *s, AVPacket *pkt)
           if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
             // Treat all of the data in the packet as silence and ignore the
             // actual data values.
-            av_log(s, AV_LOG_WARNING, "AUDCLNT_BUFFERFLAGS_SILENT\n");
             data = NULL;
           }
 
